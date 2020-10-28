@@ -5,8 +5,8 @@ from torch import nn
 # zed Models
 # https://arxiv.org/abs/1702.03275
 class ReNormalization(nn.Module):
-    def __init__(self, num_features, r_max = 1, d_max = 0, epsilon = 1e-4,
-            momentum = 0.9, affine = True):
+    def __init__(self, num_features, epsilon = 1e-4, momentum = 0.9,
+            affine = True):
         super(ReNormalization, self).__init__()
         self.affine = affine
         if self.affine:
@@ -14,20 +14,25 @@ class ReNormalization(nn.Module):
             self.bias = nn.Parameter(torch.Tensor(num_features))
         self.register_buffer('running_var', torch.ones(1, num_features, 1, 1))
         self.register_buffer('running_mean', torch.ones(1, num_features, 1, 1))
-        self.r_max = r_max
-        self.d_max = d_max
+        self.register_buffer('num_tracked_batches', torch.tensor(0))
         self.epsilon = epsilon
         self.momentum = momentum
+
+    @property
+    def r_max(self):
+        return (2 / 35000 * self.num_tracked_batches + 25 / 35).clamp_(1.0, 3.0)
+
+    @property
+    def d_max(self):
+        return (5 / 20000 * self.num_tracked_batches - 25 / 20).clamp_(0.0, 5.0)
 
     def update_stats(self, x):
         mean = x.mean((0, 2, 3), keepdim = True)
         var = x.var((0, 2, 3), keepdim = True)
-        std = (var + self.epsilon).sqrt()
+        std = x.std((0, 2, 3), keepdim = True, unbiased = False)
         running_std = (self.running_var + self.epsilon).sqrt()
-        r = torch.clamp(std / running_std, min = 1 / self.r_max,
-                max = self.r_max).detach()
-        d = torch.clamp((mean / self.running_mean) / running_std,
-                min = -self.d_max, max = self.d_max).detach()
+        r = (std / running_std).clamp_(1 / self.r_max, self.r_max).detach()
+        d = (mean / self.running_mean).clamp_(-self.d_max, self.d_max).detach()
         self.running_mean.lerp_(mean, self.momentum)
         self.running_var.lerp_(var, self.momentum)
         return mean, std, r, d
@@ -42,4 +47,5 @@ class ReNormalization(nn.Module):
                     (self.running_var + self.epsilon).sqrt()
         if self.affine:
             return self.weight * x.transpose(1, -1) + self.bias
+        self.num_tracked_batches += 1
         return x
